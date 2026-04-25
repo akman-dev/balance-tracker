@@ -1,0 +1,21 @@
+{
+  "name": "baltrack",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Deployable Next.js balance timeline planner for Vercel",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "engines": {
+    "node": ">=20.17.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "next": "^16.0.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}
