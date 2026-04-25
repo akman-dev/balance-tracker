@@ -2414,9 +2414,11 @@ function OnboardingFlow({ initialPlan, initialStepIndex = 0, onSaveProgress, onC
               <button className="ghost-button" disabled={stepIndex === 0} onClick={() => setStepIndex((value) => value - 1)}>
                 Back
               </button>
-              <button className="secondary-button" disabled={isSavingProgress || isCompleting} onClick={saveProgressNow}>
-                {isSavingProgress ? 'Saving...' : 'Save progress'}
-              </button>
+              {stepIndex > 0 ? (
+                <button className="secondary-button" disabled={isSavingProgress || isCompleting} onClick={saveProgressNow}>
+                  {isSavingProgress ? 'Saving...' : 'Save progress'}
+                </button>
+              ) : null}
             </div>
             <button className="primary-button" disabled={!canContinue || isCompleting} onClick={goNext}>
               {isCompleting ? 'Saving...' : nextLabel}
