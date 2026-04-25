@@ -1,8 +1,20 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 const LEGACY_LOCAL_PLAN_KEY = 'baltrack.plan.v1';
+const ONBOARDING_META_KEY = '__baltrackOnboarding';
+const ONBOARDING_STEPS = [
+  'Welcome',
+  'Cash accounts',
+  'Income',
+  'Bills',
+  'Credit cards',
+  'Budget + reserve',
+  'Investing',
+  'Review',
+];
+const ONBOARDING_STEP_COUNT = ONBOARDING_STEPS.length;
 
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -23,6 +35,60 @@ const INVESTMENT_SUBTYPE_OPTIONS = [
   { value: 'roth_401k', label: 'Roth 401(k)' },
   { value: 'other', label: 'Other investment' },
 ];
+
+const FILING_STATUS_OPTIONS = [
+  { value: 'single', label: 'Single' },
+  { value: 'married_jointly', label: 'Married Filing Jointly' },
+  { value: 'married_separately', label: 'Married Filing Separately' },
+  { value: 'head_of_household', label: 'Head of Household' },
+];
+
+// 2026 federal income tax brackets (IRS Rev. Proc. 2025-40)
+const FEDERAL_BRACKETS_2026 = {
+  single: [
+    { upTo: 12400, rate: 10 },
+    { upTo: 50400, rate: 12 },
+    { upTo: 105700, rate: 22 },
+    { upTo: 201775, rate: 24 },
+    { upTo: 256225, rate: 32 },
+    { upTo: 640600, rate: 35 },
+    { upTo: 0, rate: 37 },
+  ],
+  married_jointly: [
+    { upTo: 24800, rate: 10 },
+    { upTo: 100800, rate: 12 },
+    { upTo: 211400, rate: 22 },
+    { upTo: 403550, rate: 24 },
+    { upTo: 512450, rate: 32 },
+    { upTo: 768700, rate: 35 },
+    { upTo: 0, rate: 37 },
+  ],
+  married_separately: [
+    { upTo: 12400, rate: 10 },
+    { upTo: 50400, rate: 12 },
+    { upTo: 105700, rate: 22 },
+    { upTo: 201775, rate: 24 },
+    { upTo: 256225, rate: 32 },
+    { upTo: 384350, rate: 35 },
+    { upTo: 0, rate: 37 },
+  ],
+  head_of_household: [
+    { upTo: 17800, rate: 10 },
+    { upTo: 67400, rate: 12 },
+    { upTo: 105700, rate: 22 },
+    { upTo: 201775, rate: 24 },
+    { upTo: 256225, rate: 32 },
+    { upTo: 640600, rate: 35 },
+    { upTo: 0, rate: 37 },
+  ],
+};
+
+const FEDERAL_STANDARD_DEDUCTION_2026 = {
+  single: 16100,
+  married_jointly: 32200,
+  married_separately: 16100,
+  head_of_household: 24150,
+};
 
 
 const APP_STYLES = `
@@ -818,6 +884,7 @@ function BalancePlanner() {
   const [authUser, setAuthUser] = useState(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [onboardingStartStep, setOnboardingStartStep] = useState(0);
 
   useEffect(() => {
     let isMounted = true;
@@ -853,7 +920,7 @@ function BalancePlanner() {
     setAuthUser(user);
     setSaveMessage('Opening your cloud plan...');
 
-      const result = await loadStoredPlan();
+    const result = await loadStoredPlan();
     if (result?.unauthorized) {
       setAuthUser(null);
       setSaveMessage('Sign in to sync your plan across devices.');
@@ -868,11 +935,20 @@ function BalancePlanner() {
       return;
     }
 
-      setStorageLabel(result?.storageLabel || '');
+    setStorageLabel(result?.storageLabel || '');
     if (result.data) {
-        setForm(normalizePlan(result.data));
-        setNeedsOnboarding(false);
-        setSaveMessage(`Loaded your plan${result.storageLabel ? ` · ${result.storageLabel}` : ''}`);
+      const onboardingProgress = getOnboardingProgress(result.data);
+      setForm(normalizePlan(result.data));
+      if (onboardingProgress && !onboardingProgress.complete) {
+        setOnboardingStartStep(onboardingProgress.stepIndex);
+        setNeedsOnboarding(true);
+        setSaveMessage(`Resumed onboarding progress${result.storageLabel ? ` · ${result.storageLabel}` : ''}`);
+        return;
+      }
+
+      setOnboardingStartStep(0);
+      setNeedsOnboarding(false);
+      setSaveMessage(`Loaded your plan${result.storageLabel ? ` · ${result.storageLabel}` : ''}`);
       return;
     }
 
@@ -891,6 +967,7 @@ function BalancePlanner() {
     }
 
     setForm(createEmptyPlan());
+    setOnboardingStartStep(0);
     setNeedsOnboarding(true);
     setSaveMessage('No plan found yet. Start onboarding to save your real data.');
   };
@@ -911,27 +988,50 @@ function BalancePlanner() {
       }
     }, 250);
 
-      return () => window.clearTimeout(timeoutId);
+    return () => window.clearTimeout(timeoutId);
   }, [form, isHydrated, needsOnboarding, authUser]);
 
   const projection = useMemo(() => buildProjection(form), [form]);
+
+  const saveOnboardingProgress = useCallback(async (draft, stepIndex) => {
+    const normalized = normalizePlan(draft);
+    const result = await saveStoredPlan(withOnboardingProgress(normalized, stepIndex));
+    if (result?.ok) {
+      setForm(normalized);
+      setStorageLabel(result.storageLabel || '');
+      setSaveMessage(`Onboarding saved · ${formatClockTime(result.savedAt)}`);
+      return result;
+    }
+
+    if (result?.unauthorized) {
+      setAuthUser(null);
+      setSaveMessage('Sign in again to continue syncing.');
+      return result;
+    }
+
+    setSaveMessage(result?.message || 'Could not save onboarding progress.');
+    return result;
+  }, []);
+
   const finishOnboarding = async (nextPlan) => {
-    const normalized = normalizePlan({ ...nextPlan, startDate: todayISO() });
+    const normalized = normalizePlan({ ...withoutOnboardingProgress(nextPlan), startDate: todayISO() });
     const result = await saveStoredPlan(normalized);
     if (!result?.ok) {
       setSaveMessage(result?.message || 'Could not save your plan.');
-      return;
+      return false;
     }
 
     setForm(normalized);
     setStorageLabel(result.storageLabel || '');
     setSaveMessage('Plan saved to your cloud account. Welcome in.');
     setNeedsOnboarding(false);
+    return true;
   };
 
   const startOver = async () => {
     await resetStoredPlan();
     setForm(createEmptyPlan());
+    setOnboardingStartStep(0);
     setNeedsOnboarding(true);
     setSaveMessage('Cleared saved plan. Start onboarding again.');
   };
@@ -989,6 +1089,8 @@ function BalancePlanner() {
         <AppStyles />
       <OnboardingFlow
         initialPlan={form}
+        initialStepIndex={onboardingStartStep}
+        onSaveProgress={saveOnboardingProgress}
         onComplete={finishOnboarding}
         dbPath={storageLabel}
         statusMessage={saveMessage}
@@ -1698,6 +1800,12 @@ function IncomeSimulatorEditor({ form, setForm }) {
 
           const updateBrackets = (nextBrackets) =>
             updateYearSettings(year, (current) => ({ ...current, federalBrackets: nextBrackets }));
+          const updateFilingStatus = (nextStatus) =>
+            updateYearSettings(year, (current) => ({
+              ...current,
+              filingStatus: nextStatus,
+              federalStandardDeduction: FEDERAL_STANDARD_DEDUCTION_2026[nextStatus] ?? current.federalStandardDeduction,
+            }));
           const updatePretaxDeductions = (nextDeductions) =>
             updateYearSettings(year, (current) => ({ ...current, pretaxDeductions: nextDeductions }));
           const updatePostTaxDeductions = (nextDeductions) =>
@@ -1832,7 +1940,7 @@ function IncomeSimulatorEditor({ form, setForm }) {
                 </Label>
               </div>
 
-              <BracketEditor brackets={settings.federalBrackets} onChange={updateBrackets} />
+              <BracketEditor brackets={settings.federalBrackets} onChange={updateBrackets} filingStatus={settings.filingStatus} onFilingStatusChange={updateFilingStatus} />
               <DeductionEditor title="Pre-tax deductions per salary paycheck" items={settings.pretaxDeductions} onChange={updatePretaxDeductions} addLabel="Add pre-tax deduction" defaultLabel="Healthcare FSA" />
               <DeductionEditor title="Other post-tax deductions per salary paycheck" items={settings.postTaxDeductions} onChange={updatePostTaxDeductions} addLabel="Add post-tax deduction" defaultLabel="Supplemental life" />
             </Section>
@@ -1972,52 +2080,130 @@ function InvestingPage({ form, setForm, projection }) {
   );
 }
 
-function BracketEditor({ brackets, onChange }) {
+function BracketEditor({ brackets, onChange, filingStatus = 'single', onFilingStatusChange }) {
+  const [customizing, setCustomizing] = useState(false);
+  const standard2026 = FEDERAL_BRACKETS_2026[filingStatus] || FEDERAL_BRACKETS_2026.single;
+
+  const applyStandard = (status) => {
+    const brackets2026 = FEDERAL_BRACKETS_2026[status] || FEDERAL_BRACKETS_2026.single;
+    onChange(normalizeTaxBrackets(brackets2026.map((b) => createTaxBracket(b.upTo, b.rate)), status));
+  };
+
+  const handleFilingStatusChange = (nextStatus) => {
+    onFilingStatusChange?.(nextStatus);
+    applyStandard(nextStatus);
+  };
+
   return (
     <Section
-      title="Federal marginal brackets"
-      summary={`${brackets.length} bracket${brackets.length === 1 ? '' : 's'}`}
-      subtitle="Enter each bracket upper bound and marginal rate. The top bracket has no upper limit."
+      title="Federal income tax brackets"
+      summary="2026 standard"
+      subtitle="Marginal rates applied to taxable income after the standard deduction."
       collapsible
       defaultOpen={false}
     >
-      <div className="stack">
-        {brackets.map((bracket) => {
-          const isTopBracket = bracket.upTo === 0;
-
-          return (
-            <div key={bracket.id} className="item-card tight">
-              <div className={isTopBracket ? 'stack' : 'row-2'}>
-                {!isTopBracket && (
-                  <Label>
-                    Upper bound
-                    <NumericInput
-                      value={bracket.upTo}
-                      onValueChange={(next) => onChange(normalizeTaxBrackets(brackets.map((item) => (item.id === bracket.id ? { ...item, upTo: Math.max(0, next) } : item))))}
-                    />
-                  </Label>
-                )}
-                <Label>
-                  Marginal rate
-                  <NumericInput
-                    value={bracket.rate}
-                    onValueChange={(next) => onChange(normalizeTaxBrackets(brackets.map((item) => (item.id === bracket.id ? { ...item, rate: Math.max(0, next) } : item))))}
-                  />
-                </Label>
-              </div>
-              <div className="item-footer">
-                <span className="pill neutral">{isTopBracket ? 'Top bracket' : `Up to ${currency.format(bracket.upTo)}`}</span>
-                <button className="ghost-button" onClick={() => onChange(normalizeTaxBrackets(brackets.filter((item) => item.id !== bracket.id)))} disabled={brackets.length === 1}>
-                  Remove
-                </button>
-              </div>
-            </div>
-          );
-        })}
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <Label>
+          Filing status
+          <select
+            value={filingStatus}
+            onChange={(e) => handleFilingStatusChange(e.target.value)}
+            style={{ minWidth: '220px' }}
+          >
+            {FILING_STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </Label>
+        <button
+          type="button"
+          className="ghost-button"
+          style={{ marginBottom: '4px' }}
+          onClick={() => {
+            applyStandard(filingStatus);
+            setCustomizing(false);
+          }}
+        >
+          Reset to 2026 standard
+        </button>
       </div>
-      <button className="secondary-button" onClick={() => onChange(normalizeTaxBrackets([...brackets, createTaxBracket(0, brackets.at(-1)?.rate || 0)]))}>
-        Add bracket
-      </button>
+
+      {!customizing ? (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--line-2)' }}>
+                  <th style={{ textAlign: 'left', padding: '6px 10px', color: 'var(--muted)', fontWeight: 600 }}>Taxable income</th>
+                  <th style={{ textAlign: 'right', padding: '6px 10px', color: 'var(--muted)', fontWeight: 600 }}>Marginal rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {standard2026.map((bracket, index) => {
+                  const prev = standard2026[index - 1];
+                  const from = prev ? `${currency.format(prev.upTo + 1)}+` : '$0';
+                  const label = bracket.upTo === 0
+                    ? `Over ${currency.format(standard2026[index - 1]?.upTo ?? 0)}`
+                    : `${from} – ${currency.format(bracket.upTo)}`;
+                  return (
+                    <tr key={index} style={{ borderBottom: '1px solid var(--line)' }}>
+                      <td style={{ padding: '7px 10px', color: 'var(--soft)' }}>{label}</td>
+                      <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700, color: 'var(--primary)', fontVariantNumeric: 'tabular-nums' }}>{bracket.rate}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <button type="button" className="ghost-button" style={{ marginTop: '4px' }} onClick={() => setCustomizing(true)}>
+            Customize brackets
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="stack">
+            {brackets.map((bracket) => {
+              const isTopBracket = bracket.upTo === 0;
+              return (
+                <div key={bracket.id} className="item-card tight">
+                  <div className={isTopBracket ? 'stack' : 'row-2'}>
+                    {!isTopBracket && (
+                      <Label>
+                        Upper bound
+                        <NumericInput
+                          value={bracket.upTo}
+                          onValueChange={(next) => onChange(normalizeTaxBrackets(brackets.map((item) => (item.id === bracket.id ? { ...item, upTo: Math.max(0, next) } : item)), filingStatus))}
+                        />
+                      </Label>
+                    )}
+                    <Label>
+                      Marginal rate
+                      <NumericInput
+                        value={bracket.rate}
+                        onValueChange={(next) => onChange(normalizeTaxBrackets(brackets.map((item) => (item.id === bracket.id ? { ...item, rate: Math.max(0, next) } : item)), filingStatus))}
+                      />
+                    </Label>
+                  </div>
+                  <div className="item-footer">
+                    <span className="pill neutral">{isTopBracket ? 'Top bracket' : `Up to ${currency.format(bracket.upTo)}`}</span>
+                    <button className="ghost-button" onClick={() => onChange(normalizeTaxBrackets(brackets.filter((item) => item.id !== bracket.id), filingStatus))} disabled={brackets.length === 1}>
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="secondary-button" onClick={() => onChange(normalizeTaxBrackets([...brackets, createTaxBracket(0, brackets.at(-1)?.rate || 0)], filingStatus))}>
+              Add bracket
+            </button>
+            <button type="button" className="ghost-button" onClick={() => setCustomizing(false)}>
+              Back to standard view
+            </button>
+          </div>
+        </>
+      )}
     </Section>
   );
 }
@@ -2135,19 +2321,22 @@ function PageIntro({ eyebrow, title, description, badge = '' }) {
   );
 }
 
-function OnboardingFlow({ initialPlan, onComplete, dbPath, statusMessage, userEmail, onLogout }) {
-  const [stepIndex, setStepIndex] = useState(0);
+function OnboardingFlow({ initialPlan, initialStepIndex = 0, onSaveProgress, onComplete, dbPath, statusMessage, userEmail, onLogout }) {
+  const [stepIndex, setStepIndex] = useState(() => clampOnboardingStepIndex(initialStepIndex));
   const [draft, setDraft] = useState(() => normalizePlan(initialPlan));
-  const steps = [
-    'Welcome',
-    'Cash accounts',
-    'Income',
-    'Bills',
-    'Credit cards',
-    'Budget + reserve',
-    'Investing',
-    'Review',
-  ];
+  const [isSavingProgress, setIsSavingProgress] = useState(false);
+  const [isCompleting, setIsCompleting] = useState(false);
+  const steps = ONBOARDING_STEPS;
+
+  useEffect(() => {
+    if (isCompleting) return undefined;
+
+    const timeoutId = window.setTimeout(() => {
+      onSaveProgress?.(draft, stepIndex);
+    }, 600);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [draft, stepIndex, isCompleting, onSaveProgress]);
 
   const canContinue = validateOnboardingStep(stepIndex, draft);
   const nextLabel = stepIndex === steps.length - 1 ? 'Save and enter app' : 'Next';
@@ -2155,10 +2344,18 @@ function OnboardingFlow({ initialPlan, onComplete, dbPath, statusMessage, userEm
   const goNext = async () => {
     if (!canContinue) return;
     if (stepIndex === steps.length - 1) {
-      await onComplete(draft);
+      setIsCompleting(true);
+      const completed = await onComplete(draft);
+      if (!completed) setIsCompleting(false);
       return;
     }
     setStepIndex((value) => value + 1);
+  };
+
+  const saveProgressNow = async () => {
+    setIsSavingProgress(true);
+    await onSaveProgress?.(draft, stepIndex);
+    setIsSavingProgress(false);
   };
 
   return (
@@ -2213,11 +2410,16 @@ function OnboardingFlow({ initialPlan, onComplete, dbPath, statusMessage, userEm
           {stepIndex === 7 ? <ReviewStep draft={draft} /> : null}
 
           <div className="wizard-footer">
-            <button className="ghost-button" disabled={stepIndex === 0} onClick={() => setStepIndex((value) => value - 1)}>
-              Back
-            </button>
-            <button className="primary-button" disabled={!canContinue} onClick={goNext}>
-              {nextLabel}
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              <button className="ghost-button" disabled={stepIndex === 0} onClick={() => setStepIndex((value) => value - 1)}>
+                Back
+              </button>
+              <button className="secondary-button" disabled={isSavingProgress || isCompleting} onClick={saveProgressNow}>
+                {isSavingProgress ? 'Saving...' : 'Save progress'}
+              </button>
+            </div>
+            <button className="primary-button" disabled={!canContinue || isCompleting} onClick={goNext}>
+              {isCompleting ? 'Saving...' : nextLabel}
             </button>
           </div>
         </div>
@@ -2327,44 +2529,236 @@ function SimpleTakeHomeForm({ draft, setDraft, currentYear }) {
   );
 }
 
+function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
+  const [gross, setGross] = useState(0);
+  const [stateTax, setStateTax] = useState(0);
+  const [oasdi, setOasdi] = useState(0);
+  const [medicare, setMedicare] = useState(0);
+  const [roth401k, setRoth401k] = useState(0);
+  const [afterTax401k, setAfterTax401k] = useState(0);
+  const [employerMatch, setEmployerMatch] = useState(0);
+  const [pretaxItems, setPretaxItems] = useState([{ id: makeId(), label: 'Healthcare FSA', amount: 0 }]);
+  const [postTaxItems, setPostTaxItems] = useState([]);
+  const [filingStatus, setFilingStatus] = useState('single');
+  const [applied, setApplied] = useState(false);
+
+  const pretaxTotal = pretaxItems.reduce((sum, item) => sum + item.amount, 0);
+  const taxableWages = Math.max(0, gross - pretaxTotal);
+  const stateTaxRate = taxableWages > 0 ? (stateTax / taxableWages) * 100 : 0;
+  const ssRate = gross > 0 ? (oasdi / gross) * 100 : 0;
+  const medicareRate = gross > 0 ? (medicare / gross) * 100 : 0;
+  const rothPct = gross > 0 ? (roth401k / gross) * 100 : 0;
+  const afterTaxPct = gross > 0 ? (afterTax401k / gross) * 100 : 0;
+  const matchPct = gross > 0 ? (employerMatch / gross) * 100 : 0;
+
+  const canApply = gross > 0;
+
+  const apply = () => {
+    setDraft((current) => {
+      const normalized = normalizeIncomeModel(current.incomeModel, current.accounts, current.paychecks, current.startDate);
+      const existing = createIncomeYearSettings(getResolvedIncomeYearSettings(normalized, currentYear));
+      const brackets2026 = (FEDERAL_BRACKETS_2026[filingStatus] || FEDERAL_BRACKETS_2026.single).map((b) => createTaxBracket(b.upTo, b.rate));
+      return {
+        ...current,
+        incomeModel: {
+          ...normalized,
+          yearlySettings: {
+            ...normalized.yearlySettings,
+            [currentYear]: createIncomeYearSettings({
+              ...existing,
+              filingStatus,
+              baseSalary: gross * 12,
+              federalStandardDeduction: FEDERAL_STANDARD_DEDUCTION_2026[filingStatus],
+              federalBrackets: brackets2026,
+              stateTaxRate: Math.round(stateTaxRate * 100) / 100,
+              socialSecurityRate: 6.2,
+              medicareRate: 1.45,
+              roth401kPercent: Math.round(rothPct * 100) / 100,
+              afterTax401kPercent: Math.round(afterTaxPct * 100) / 100,
+              employerMatchPercent: Math.round(matchPct * 100) / 100,
+              pretaxDeductions: pretaxItems.filter((item) => item.amount > 0),
+              postTaxDeductions: postTaxItems.filter((item) => item.amount > 0),
+            }),
+          },
+        },
+      };
+    });
+    setApplied(true);
+    onApplied?.();
+  };
+
+  const pillStyle = { fontSize: '0.72rem', fontWeight: 700, padding: '2px 8px', borderRadius: '99px', background: 'var(--primary-bg)', color: 'var(--primary)', border: '1px solid var(--primary-border)', fontVariantNumeric: 'tabular-nums' };
+
+  return (
+    <div className="section-block onboarding-fields">
+      <p className="section-note" style={{ marginTop: 0 }}>
+        Enter amounts directly from your last regular salary paycheck. Federal brackets are filled in automatically using 2026 IRS tables.
+      </p>
+
+      <div className="row-2">
+        <Label>
+          Filing status
+          <select value={filingStatus} onChange={(e) => setFilingStatus(e.target.value)}>
+            {FILING_STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </Label>
+        <Label hint="Your monthly gross before any deductions or taxes.">
+          Gross pay (this paycheck)
+          <NumericInput value={gross} onValueChange={setGross} />
+        </Label>
+      </div>
+
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Taxes withheld</div>
+      <div className="row-2" style={{ alignItems: 'end' }}>
+        <Label hint="Federal income tax withheld — brackets are set automatically from 2026 IRS tables.">
+          Federal income tax (for reference)
+          <NumericInput value={0} onValueChange={() => {}} />
+          <span className="input-hint" style={{ color: 'var(--primary)', fontStyle: 'normal' }}>Auto-filled from 2026 {FILING_STATUS_OPTIONS.find((o) => o.value === filingStatus)?.label} brackets</span>
+        </Label>
+        <Label hint="State income tax withheld this paycheck — used to calculate your effective state rate.">
+          State income tax
+          <NumericInput value={stateTax} onValueChange={setStateTax} />
+          {stateTaxRate > 0 && <span style={pillStyle}>{stateTaxRate.toFixed(2)}% rate</span>}
+        </Label>
+      </div>
+      <div className="row-2">
+        <Label hint="OASDI / Social Security withheld.">
+          Social Security (OASDI)
+          <NumericInput value={oasdi} onValueChange={setOasdi} />
+          {ssRate > 0 && <span style={pillStyle}>{ssRate.toFixed(2)}% rate</span>}
+        </Label>
+        <Label hint="Medicare tax withheld (standard 1.45%).">
+          Medicare
+          <NumericInput value={medicare} onValueChange={setMedicare} />
+          {medicareRate > 0 && <span style={pillStyle}>{medicareRate.toFixed(2)}% rate</span>}
+        </Label>
+      </div>
+
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Pre-tax deductions</div>
+      <div className="stack">
+        {pretaxItems.map((item) => (
+          <div key={item.id} style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+            <Label>
+              Label
+              <input
+                value={item.label}
+                onChange={(e) => setPretaxItems((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, label: e.target.value } : entry))}
+              />
+            </Label>
+            <Label>
+              Amount
+              <NumericInput value={item.amount} onValueChange={(next) => setPretaxItems((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, amount: next } : entry))} />
+            </Label>
+            <button className="ghost-button" style={{ marginBottom: '4px' }} onClick={() => setPretaxItems((prev) => prev.filter((entry) => entry.id !== item.id))}>
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+      <button className="ghost-button" onClick={() => setPretaxItems((prev) => [...prev, { id: makeId(), label: 'Healthcare FSA', amount: 0 }])}>
+        + Add pre-tax deduction
+      </button>
+
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '8px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>401(k) contributions</div>
+      <div className="row-3">
+        <Label hint="Employee Roth 401(k) withheld this paycheck.">
+          Roth 401(k)
+          <NumericInput value={roth401k} onValueChange={setRoth401k} />
+          {rothPct > 0 && <span style={pillStyle}>{rothPct.toFixed(2)}%</span>}
+        </Label>
+        <Label hint="Employee after-tax 401(k) withheld this paycheck.">
+          After-tax 401(k)
+          <NumericInput value={afterTax401k} onValueChange={setAfterTax401k} />
+          {afterTaxPct > 0 && <span style={pillStyle}>{afterTaxPct.toFixed(2)}%</span>}
+        </Label>
+        <Label hint="Employer match deposited this paycheck.">
+          Employer match
+          <NumericInput value={employerMatch} onValueChange={setEmployerMatch} />
+          {matchPct > 0 && <span style={pillStyle}>{matchPct.toFixed(2)}%</span>}
+        </Label>
+      </div>
+
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Other post-tax deductions</div>
+      <div className="stack">
+        {postTaxItems.map((item) => (
+          <div key={item.id} style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+            <Label>
+              Label
+              <input
+                value={item.label}
+                onChange={(e) => setPostTaxItems((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, label: e.target.value } : entry))}
+              />
+            </Label>
+            <Label>
+              Amount
+              <NumericInput value={item.amount} onValueChange={(next) => setPostTaxItems((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, amount: next } : entry))} />
+            </Label>
+            <button className="ghost-button" style={{ marginBottom: '4px' }} onClick={() => setPostTaxItems((prev) => prev.filter((entry) => entry.id !== item.id))}>
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+      <button className="ghost-button" onClick={() => setPostTaxItems((prev) => [...prev, { id: makeId(), label: 'AD&D Post', amount: 0 }])}>
+        + Add post-tax deduction
+      </button>
+
+      <div style={{ marginTop: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="primary-button" disabled={!canApply} onClick={apply}>
+          Apply to income settings
+        </button>
+        {applied && (
+          <span style={{ fontSize: '0.8rem', color: 'var(--green)', fontWeight: 600 }}>
+            Settings applied — switch to Full simulator to review or fine-tune.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function IncomeStep({ draft, setDraft }) {
   const [incomeMode, setIncomeMode] = useState('simple');
   const currentYear = parseLocalDate(draft.startDate).getFullYear();
+
+  const activeStyle = { borderColor: 'rgba(111,163,255,0.45)', color: 'var(--text)', background: 'var(--primary-bg)' };
+
+  const descriptions = {
+    simple: 'Enter the amount that hits your bank after all taxes — you can always switch to the full simulator later.',
+    paycheck: 'Enter numbers from your last pay stub and we\'ll calculate the rates. Federal brackets are filled in automatically from 2026 IRS tables.',
+    full: 'Model gross salary, tax brackets, deductions, and 401(k) contributions so the planner estimates take-home precisely.',
+  };
 
   return (
     <div className="stack-lg">
       <div>
         <div className="eyebrow">Step 3</div>
         <h2 className="display-title">Set up your income</h2>
-        <p className="muted large-copy">
-          {incomeMode === 'simple'
-            ? 'Enter the amount that hits your bank after all taxes — you can always switch to the full simulator later.'
-            : 'Model gross salary, tax brackets, deductions, and 401(k) contributions so the planner estimates take-home precisely.'}
-        </p>
+        <p className="muted large-copy">{descriptions[incomeMode]}</p>
       </div>
-      <div style={{ display: 'flex', gap: '8px' }}>
-        <button
-          type="button"
-          className="ghost-button"
-          style={incomeMode === 'simple' ? { borderColor: 'rgba(111,163,255,0.45)', color: 'var(--text)', background: 'var(--primary-bg)' } : {}}
-          onClick={() => setIncomeMode('simple')}
-        >
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        <button type="button" className="ghost-button" style={incomeMode === 'simple' ? activeStyle : {}} onClick={() => setIncomeMode('simple')}>
           Take-home pay
         </button>
-        <button
-          type="button"
-          className="ghost-button"
-          style={incomeMode === 'full' ? { borderColor: 'rgba(111,163,255,0.45)', color: 'var(--text)', background: 'var(--primary-bg)' } : {}}
-          onClick={() => setIncomeMode('full')}
-        >
-          Full salary + tax simulator
+        <button type="button" className="ghost-button" style={incomeMode === 'paycheck' ? activeStyle : {}} onClick={() => setIncomeMode('paycheck')}>
+          Import from paycheck
+        </button>
+        <button type="button" className="ghost-button" style={incomeMode === 'full' ? activeStyle : {}} onClick={() => setIncomeMode('full')}>
+          Full simulator
         </button>
       </div>
-      {incomeMode === 'simple' ? (
-        <SimpleTakeHomeForm draft={draft} setDraft={setDraft} currentYear={currentYear} />
-      ) : (
-        <IncomeSimulatorEditor form={draft} setForm={setDraft} />
+      {incomeMode === 'simple' && <SimpleTakeHomeForm draft={draft} setDraft={setDraft} currentYear={currentYear} />}
+      {incomeMode === 'paycheck' && (
+        <PaycheckImportForm
+          draft={draft}
+          setDraft={setDraft}
+          currentYear={currentYear}
+          onApplied={() => setIncomeMode('full')}
+        />
       )}
+      {incomeMode === 'full' && <IncomeSimulatorEditor form={draft} setForm={setDraft} />}
     </div>
   );
 }
@@ -4101,6 +4495,36 @@ function normalizePlan(raw = {}) {
   };
 }
 
+function getOnboardingProgress(raw = {}) {
+  const meta = raw?.[ONBOARDING_META_KEY];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+
+  return {
+    complete: meta.complete === true,
+    stepIndex: clampOnboardingStepIndex(meta.stepIndex),
+  };
+}
+
+function withOnboardingProgress(plan, stepIndex) {
+  return {
+    ...withoutOnboardingProgress(plan),
+    [ONBOARDING_META_KEY]: {
+      complete: false,
+      stepIndex: clampOnboardingStepIndex(stepIndex),
+      savedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function withoutOnboardingProgress(raw = {}) {
+  const { [ONBOARDING_META_KEY]: _onboardingProgress, ...plan } = raw && typeof raw === 'object' ? raw : {};
+  return plan;
+}
+
+function clampOnboardingStepIndex(value) {
+  return Math.min(ONBOARDING_STEP_COUNT - 1, Math.max(0, Math.trunc(Number(value) || 0)));
+}
+
 function createEmptyPlan() {
   const accounts = [createAccount()];
   return {
@@ -4546,10 +4970,16 @@ function createDeduction(label = 'Deduction', amount = 0) {
 }
 
 function createIncomeYearSettings(seed = {}) {
+  const validStatuses = ['single', 'married_jointly', 'married_separately', 'head_of_household'];
+  const filingStatus = validStatuses.includes(seed.filingStatus) ? seed.filingStatus : 'single';
+  const defaultDeduction = FEDERAL_STANDARD_DEDUCTION_2026[filingStatus];
   return {
+    filingStatus,
     baseSalary: Math.max(0, Number(seed.baseSalary) || 0),
     bonusAmount: Math.max(0, Number(seed.bonusAmount) || 0),
-    federalStandardDeduction: Math.max(0, Number(seed.federalStandardDeduction) || 0),
+    federalStandardDeduction: seed.federalStandardDeduction != null
+      ? Math.max(0, Number(seed.federalStandardDeduction) || 0)
+      : defaultDeduction,
     stateTaxRate: Math.max(0, Number(seed.stateTaxRate) || 0),
     socialSecurityRate: Math.max(0, Number(seed.socialSecurityRate) || 6.2),
     socialSecurityWageBase: Math.max(0, Number(seed.socialSecurityWageBase) || 176100),
@@ -4561,7 +4991,7 @@ function createIncomeYearSettings(seed = {}) {
     employerMatchPercent: clampPercentage(seed.employerMatchPercent ?? 4),
     roth401kLimit: Math.max(0, Number(seed.roth401kLimit) || 24500),
     total401kLimit: Math.max(0, Number(seed.total401kLimit) || 69000),
-    federalBrackets: normalizeTaxBrackets(seed.federalBrackets),
+    federalBrackets: normalizeTaxBrackets(seed.federalBrackets, filingStatus),
     pretaxDeductions: normalizeDeductionList(seed.pretaxDeductions, 'Healthcare FSA'),
     postTaxDeductions: normalizeDeductionList(seed.postTaxDeductions, 'Post-tax deduction'),
   };
@@ -4784,18 +5214,10 @@ function simulateIncomeYearPreview(incomeModel, year) {
   };
 }
 
-function normalizeTaxBrackets(list) {
-  const raw = Array.isArray(list) && list.length
-    ? list
-    : [
-        createTaxBracket(12400, 10),
-        createTaxBracket(50400, 12),
-        createTaxBracket(105700, 22),
-        createTaxBracket(201775, 24),
-        createTaxBracket(256225, 32),
-        createTaxBracket(640600, 35),
-        createTaxBracket(0, 37),
-      ];
+function normalizeTaxBrackets(list, filingStatus = 'single') {
+  const defaultBrackets = (FEDERAL_BRACKETS_2026[filingStatus] || FEDERAL_BRACKETS_2026.single)
+    .map((b) => createTaxBracket(b.upTo, b.rate));
+  const raw = Array.isArray(list) && list.length ? list : defaultBrackets;
 
   return raw
     .map((item) => ({

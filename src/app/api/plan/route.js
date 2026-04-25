@@ -4,6 +4,8 @@ import { ensureAppSchema, hasDatabaseConfig } from '@/lib/db';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const ONBOARDING_META_KEY = '__baltrackOnboarding';
+
 export async function GET(request) {
   const auth = await requireUser(request);
   if (auth.response) return auth.response;
@@ -30,6 +32,18 @@ export async function PUT(request) {
 
   const store = await getPlanStore();
   const savedAt = new Date().toISOString();
+  if (isIncompleteOnboardingDraft(plan)) {
+    const existingPlan = await store.load(auth.user.id);
+    if (existingPlan && !isIncompleteOnboardingDraft(existingPlan)) {
+      return jsonNoStore({
+        ok: true,
+        savedAt,
+        storage: 'postgres',
+        storageLabel: 'Cloud database',
+      });
+    }
+  }
+
   await store.save(auth.user.id, plan, savedAt);
 
   return jsonNoStore({
@@ -79,6 +93,11 @@ function jsonNoStore(body, init = {}) {
       'Cache-Control': 'no-store',
     },
   });
+}
+
+function isIncompleteOnboardingDraft(plan) {
+  const meta = plan?.[ONBOARDING_META_KEY];
+  return Boolean(meta && typeof meta === 'object' && !Array.isArray(meta) && meta.complete === false);
 }
 
 async function getPlanStore() {
