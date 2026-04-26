@@ -1705,7 +1705,7 @@ function IncomePage({ form, setForm }) {
       <PageIntro
         eyebrow="Income"
         title="Income simulator"
-        description="Model salary, bonus, taxes, deductions, and 401(k) contributions by year instead of editing a post-tax paycheck by hand."
+        description="Model salary, bonus, taxes, and deductions by year instead of editing a post-tax paycheck by hand."
         badge={currency.format(getResolvedIncomeYearSettings(form.incomeModel, parseLocalDate(form.startDate).getFullYear()).baseSalary)}
       />
       <IncomeSimulatorEditor form={form} setForm={setForm} />
@@ -1845,11 +1845,10 @@ function IncomeSimulatorEditor({ form, setForm }) {
                 ) : null}
               </div>
 
-              <div className="summary-grid summary-grid-4">
+              <div className="summary-grid summary-grid-3">
                 <MiniInfo label="Annual gross pay" value={currency.format(preview.totals.gross)} caption={`${currency.format(settings.baseSalary)} salary + ${currency.format(settings.bonusAmount)} bonus`} />
                 <MiniInfo label="Annual take-home" value={currency.format(preview.totals.takeHome)} caption={`Deposited into ${getAccountNameById(form.accounts, depositAccountId)}`} />
                 <MiniInfo label="Annual taxes" value={currency.format(preview.totals.taxes)} caption={`${preview.totals.effectiveTaxRate.toFixed(1)}% effective rate`} />
-                <MiniInfo label="401(k) funded" value={currency.format(preview.totals.totalRetirement)} caption={`${currency.format(preview.totals.employeeRetirement)} employee + ${currency.format(preview.totals.employerMatch)} salary-only match`} />
               </div>
 
               <div className="row-2">
@@ -1874,32 +1873,6 @@ function IncomeSimulatorEditor({ form, setForm }) {
                 <Label>
                   Bonus (annual, paid on configured bonus date)
                   <NumericInput value={settings.bonusAmount} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, bonusAmount: Math.max(0, next) }))} />
-                </Label>
-              </div>
-
-              <div className="row-3">
-                <Label>
-                  Roth 401(k) percent
-                  <NumericInput value={settings.roth401kPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, roth401kPercent: next }))} />
-                </Label>
-                <Label>
-                  After-tax 401(k) percent
-                  <NumericInput value={settings.afterTax401kPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, afterTax401kPercent: next }))} />
-                </Label>
-                <Label hint="Applied only to base-salary paychecks, not the annual bonus.">
-                  Employer match percent
-                  <NumericInput value={settings.employerMatchPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, employerMatchPercent: next }))} />
-                </Label>
-              </div>
-
-              <div className="row-2">
-                <Label>
-                  Roth 401(k) yearly employee limit
-                  <NumericInput value={settings.roth401kLimit} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, roth401kLimit: Math.max(0, next) }))} />
-                </Label>
-                <Label hint="Use the full plan limit here so after-tax plus employer match stop when the annual total is reached.">
-                  Total 401(k) yearly plan limit
-                  <NumericInput value={settings.total401kLimit} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, total401kLimit: Math.max(0, next) }))} />
                 </Label>
               </div>
 
@@ -1953,6 +1926,7 @@ function IncomeSimulatorEditor({ form, setForm }) {
 
 function InvestingPage({ form, setForm, projection }) {
   const investmentModel = normalizeInvestmentModel(form.investmentModel, form.accounts, form);
+  const projectedYears = buildProjectedYearConfigs(form.startDate, form.projectionYears);
   const annualizedInvestment = Math.max(0, Number(investmentModel.recurringAmount) || 0) * 12;
   const cashAccounts = getCashAccounts(form.accounts);
   const investmentAccounts = getInvestmentAccounts(form.accounts);
@@ -1990,7 +1964,7 @@ function InvestingPage({ form, setForm, projection }) {
       <PageIntro
         eyebrow="Investing"
         title="Recurring investment plan"
-        description="Track the default brokerage funding plan and the projected return used for net-worth projections. Starting invested balances now live in the Accounts tab as investment accounts."
+        description="Track brokerage funding, 401(k) contribution progress, annual limits, and projected returns used for net-worth projections. Starting invested balances now live in the Accounts tab as investment accounts."
         badge={investmentModel.recurringAmount > 0 ? `${currency.format(investmentModel.recurringAmount)} monthly` : 'Not scheduled'}
       />
       <Section
@@ -2076,7 +2050,126 @@ function InvestingPage({ form, setForm, projection }) {
           <MiniInfo label="Annualized" value={currency.format(annualizedInvestment)} caption={`${investmentModel.annualReturnRate}% yearly return assumption`} />
         </div>
       </Section>
+      <RetirementContributionSettings
+        form={form}
+        setForm={setForm}
+        years={projectedYears.map(({ year }) => year)}
+      />
     </>
+  );
+}
+
+function RetirementContributionSettings({ form, setForm, years, inline = false }) {
+  const incomeModel = normalizeIncomeModel(form.incomeModel, form.accounts, form.paychecks, form.startDate);
+  const investmentModel = normalizeInvestmentModel(form.investmentModel, form.accounts, form);
+  const yearList = Array.isArray(years) && years.length ? years : [parseLocalDate(form.startDate).getFullYear()];
+
+  const updateYearSettings = (year, updater) =>
+    setForm((current) => {
+      const normalizedIncomeModel = normalizeIncomeModel(current.incomeModel, current.accounts, current.paychecks, current.startDate);
+      const nextSettings = updater(createIncomeYearSettings(getResolvedIncomeYearSettings(normalizedIncomeModel, year)));
+      return {
+        ...current,
+        incomeModel: {
+          ...normalizedIncomeModel,
+          yearlySettings: {
+            ...normalizedIncomeModel.yearlySettings,
+            [year]: createIncomeYearSettings(nextSettings),
+          },
+        },
+      };
+    });
+
+  const updateProgress = (year, updater) =>
+    setForm((current) => {
+      const normalizedInvestmentModel = normalizeInvestmentModel(current.investmentModel, current.accounts, current);
+      const nextProgress = updater(getRetirementProgressForYear(normalizedInvestmentModel, year));
+      return {
+        ...current,
+        investmentModel: {
+          ...normalizedInvestmentModel,
+          retirementProgressByYear: {
+            ...normalizedInvestmentModel.retirementProgressByYear,
+            [year]: createRetirementProgress(nextProgress),
+          },
+        },
+      };
+    });
+
+  const renderFields = (year) => {
+    const settings = createIncomeYearSettings(getResolvedIncomeYearSettings(incomeModel, year));
+    const progress = getRetirementProgressForYear(investmentModel, year);
+    const standardEmployeeContributed = progress.rothEmployeeContributed;
+    const totalContributed = standardEmployeeContributed + progress.afterTaxContributed + progress.employerMatchContributed;
+    const employeeRemaining = Math.max(0, settings.roth401kLimit - progress.rothEmployeeContributed);
+    const planRemaining = Math.max(0, settings.total401kLimit - totalContributed);
+
+    return (
+      <>
+        <div className="row-3">
+          <Label>
+            Roth 401(k) percent
+            <NumericInput value={settings.roth401kPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, roth401kPercent: next }))} />
+          </Label>
+          <Label>
+            After-tax 401(k) percent
+            <NumericInput value={settings.afterTax401kPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, afterTax401kPercent: next }))} />
+          </Label>
+          <Label hint="Applied only to base-salary paychecks, not the annual bonus.">
+            Employer match percent
+            <NumericInput value={settings.employerMatchPercent} integer sanitize={clampPercentage} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, employerMatchPercent: next }))} />
+          </Label>
+        </div>
+        <div className="row-3">
+          <Label hint="How much employee Roth or traditional 401(k) money has already counted toward the employee limit this year.">
+            Employee contributed so far
+            <NumericInput value={progress.rothEmployeeContributed} onValueChange={(next) => updateProgress(year, (current) => ({ ...current, rothEmployeeContributed: Math.max(0, next) }))} />
+          </Label>
+          <Label hint="After-tax 401(k) contributions already made this year, if your plan supports them.">
+            After-tax contributed so far
+            <NumericInput value={progress.afterTaxContributed} onValueChange={(next) => updateProgress(year, (current) => ({ ...current, afterTaxContributed: Math.max(0, next) }))} />
+          </Label>
+          <Label hint="Employer match already deposited this year.">
+            Employer match so far
+            <NumericInput value={progress.employerMatchContributed} onValueChange={(next) => updateProgress(year, (current) => ({ ...current, employerMatchContributed: Math.max(0, next) }))} />
+          </Label>
+        </div>
+        <div className="row-2">
+          <Label>
+            Employee yearly limit
+            <NumericInput value={settings.roth401kLimit} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, roth401kLimit: Math.max(0, next) }))} />
+          </Label>
+          <Label hint="Use the full plan limit here so after-tax plus employer match stop when the annual total is reached.">
+            Total yearly plan limit
+            <NumericInput value={settings.total401kLimit} onValueChange={(next) => updateYearSettings(year, (current) => ({ ...current, total401kLimit: Math.max(0, next) }))} />
+          </Label>
+        </div>
+        <div className="summary-grid summary-grid-3">
+          <MiniInfo label="Employee remaining" value={currency.format(employeeRemaining)} caption={`${currency.format(standardEmployeeContributed)} entered so far`} />
+          <MiniInfo label="Plan remaining" value={currency.format(planRemaining)} caption={`${currency.format(totalContributed)} total entered so far`} />
+          <MiniInfo label="Retirement destination" value={getAccountNameById(form.accounts, investmentModel.retirementAccountId)} caption="Projected contributions land here" />
+        </div>
+      </>
+    );
+  };
+
+  if (inline) return <>{renderFields(yearList[0])}</>;
+
+  return (
+    <div className="stack">
+      {yearList.map((year, index) => (
+        <Section
+          key={year}
+          title={`401(k) contribution settings for ${year}`}
+          summary={index === 0 ? 'Current progress + limits' : 'Future year limits'}
+          subtitle="Enter year-to-date progress and limits here so projected payroll contributions stop at the right point."
+          collapsible
+          defaultOpen={index === 0}
+        >
+          {renderFields(year)}
+        </Section>
+      ))}
+    </div>
   );
 }
 
@@ -2263,11 +2356,8 @@ function PaycheckBreakdownCard({ title, subtitle, breakdown, emptyMessage = 'No 
       <MetricRow label="State tax" value={`-${currency.format(breakdown.stateTax)}`} subtle />
       <MetricRow label="Social Security" value={`-${currency.format(breakdown.socialSecurityTax)}`} subtle />
       <MetricRow label="Medicare" value={`-${currency.format(breakdown.medicareTax + breakdown.additionalMedicareTax)}`} subtle />
-      <MetricRow label="Roth 401(k)" value={`-${currency.format(breakdown.rothContribution)}`} subtle />
-      <MetricRow label="After-tax 401(k)" value={`-${currency.format(breakdown.afterTaxContribution)}`} subtle />
       <MetricRow label="Other post-tax" value={`-${currency.format(breakdown.postTaxDeductions)}`} subtle />
       <MetricRow label="Net pay to bank" value={currency.format(breakdown.netCash)} />
-      <MetricRow label="Employer 401(k) match" value={currency.format(breakdown.employerMatch)} subtle />
     </div>
   );
 }
@@ -2526,7 +2616,7 @@ function SimpleTakeHomeForm({ draft, setDraft, currentYear }) {
           />
         </Label>
       </div>
-      <p className="section-note">Switch to the full simulator above to model gross salary, tax brackets, 401(k) withholding, and bonus timing.</p>
+      <p className="section-note">Switch to the full simulator above to model gross salary, tax brackets, deductions, and bonus timing.</p>
     </div>
   );
 }
@@ -2536,9 +2626,6 @@ function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
   const [stateTax, setStateTax] = useState(0);
   const [oasdi, setOasdi] = useState(0);
   const [medicare, setMedicare] = useState(0);
-  const [roth401k, setRoth401k] = useState(0);
-  const [afterTax401k, setAfterTax401k] = useState(0);
-  const [employerMatch, setEmployerMatch] = useState(0);
   const [pretaxItems, setPretaxItems] = useState([{ id: makeId(), label: 'Healthcare FSA', amount: 0 }]);
   const [postTaxItems, setPostTaxItems] = useState([]);
   const [filingStatus, setFilingStatus] = useState('single');
@@ -2549,9 +2636,6 @@ function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
   const stateTaxRate = taxableWages > 0 ? (stateTax / taxableWages) * 100 : 0;
   const ssRate = gross > 0 ? (oasdi / gross) * 100 : 0;
   const medicareRate = gross > 0 ? (medicare / gross) * 100 : 0;
-  const rothPct = gross > 0 ? (roth401k / gross) * 100 : 0;
-  const afterTaxPct = gross > 0 ? (afterTax401k / gross) * 100 : 0;
-  const matchPct = gross > 0 ? (employerMatch / gross) * 100 : 0;
 
   const canApply = gross > 0;
 
@@ -2575,9 +2659,6 @@ function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
               stateTaxRate: Math.round(stateTaxRate * 100) / 100,
               socialSecurityRate: 6.2,
               medicareRate: 1.45,
-              roth401kPercent: Math.round(rothPct * 100) / 100,
-              afterTax401kPercent: Math.round(afterTaxPct * 100) / 100,
-              employerMatchPercent: Math.round(matchPct * 100) / 100,
               pretaxDeductions: pretaxItems.filter((item) => item.amount > 0),
               postTaxDeductions: postTaxItems.filter((item) => item.amount > 0),
             }),
@@ -2594,7 +2675,7 @@ function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
   return (
     <div className="section-block onboarding-fields">
       <p className="section-note" style={{ marginTop: 0 }}>
-        Enter amounts directly from your last regular salary paycheck. Federal brackets are filled in automatically using 2026 IRS tables.
+        Enter income, taxes, and non-401(k) deductions from your last regular salary paycheck. Federal brackets are filled in automatically using 2026 IRS tables.
       </p>
 
       <div className="row-2">
@@ -2663,25 +2744,6 @@ function PaycheckImportForm({ draft, setDraft, currentYear, onApplied }) {
         + Add pre-tax deduction
       </button>
 
-      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '8px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>401(k) contributions</div>
-      <div className="row-3">
-        <Label hint="Employee Roth 401(k) withheld this paycheck.">
-          Roth 401(k)
-          <NumericInput value={roth401k} onValueChange={setRoth401k} />
-          {rothPct > 0 && <span style={pillStyle}>{rothPct.toFixed(2)}%</span>}
-        </Label>
-        <Label hint="Employee after-tax 401(k) withheld this paycheck.">
-          After-tax 401(k)
-          <NumericInput value={afterTax401k} onValueChange={setAfterTax401k} />
-          {afterTaxPct > 0 && <span style={pillStyle}>{afterTaxPct.toFixed(2)}%</span>}
-        </Label>
-        <Label hint="Employer match deposited this paycheck.">
-          Employer match
-          <NumericInput value={employerMatch} onValueChange={setEmployerMatch} />
-          {matchPct > 0 && <span style={pillStyle}>{matchPct.toFixed(2)}%</span>}
-        </Label>
-      </div>
-
       <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Other post-tax deductions</div>
       <div className="stack">
         {postTaxItems.map((item) => (
@@ -2729,8 +2791,8 @@ function IncomeStep({ draft, setDraft }) {
 
   const descriptions = {
     simple: 'Enter the amount that hits your bank after all taxes — you can always switch to the full simulator later.',
-    paycheck: 'Enter numbers from your last pay stub and we\'ll calculate the rates. Federal brackets are filled in automatically from 2026 IRS tables.',
-    full: 'Model gross salary, tax brackets, deductions, and 401(k) contributions so the planner estimates take-home precisely.',
+    paycheck: 'Enter pay, tax, and deduction numbers from your last pay stub and we\'ll calculate the rates. Federal brackets are filled in automatically from 2026 IRS tables.',
+    full: 'Model gross salary, tax brackets, and deductions so the planner estimates take-home precisely.',
   };
 
   return (
@@ -2837,13 +2899,14 @@ function InvestingStep({ draft, setDraft }) {
   const investmentModel = normalizeInvestmentModel(draft.investmentModel, draft.accounts, draft);
   const cashAccounts = getCashAccounts(draft.accounts);
   const investmentAccounts = getInvestmentAccounts(draft.accounts);
+  const currentYear = parseLocalDate(draft.startDate).getFullYear();
 
   return (
     <div className="stack-lg">
       <div>
         <div className="eyebrow">Step 7</div>
         <h2 className="display-title">Set up your investment plan</h2>
-        <p className="muted large-copy">Configure your recurring brokerage contributions, 401(k) destination, and projected return rate. All of this can be changed later from the Investing tab.</p>
+        <p className="muted large-copy">Configure brokerage contributions, 401(k) progress and limits, destination accounts, and projected return rate. All of this can be changed later from the Investing tab.</p>
       </div>
       {investmentAccounts.length === 0 ? (
         <p className="section-note">No investment accounts found — you can add them from the Accounts tab after setup, then configure these settings from the Investing tab.</p>
@@ -2913,6 +2976,7 @@ function InvestingStep({ draft, setDraft }) {
             </select>
           </Label>
         </div>
+        <RetirementContributionSettings form={draft} setForm={setDraft} years={[currentYear]} inline />
       </div>
     </div>
   );
@@ -3256,7 +3320,7 @@ function PaycheckKeepScheduleEditor({ form, setForm, collapsible = true, default
     <Section
       title="Monthly paycheck kept"
       summary={customMonthCount ? `${customMonthCount} custom month${customMonthCount === 1 ? '' : 's'}` : 'All months at 100%'}
-      subtitle="Set how much of each paycheck you actually keep in each month of the year after 401(k) or similar deductions."
+      subtitle="Set how much of each paycheck you actually keep in each month of the year after any deductions that are not modeled elsewhere."
       collapsible={collapsible}
       defaultOpen={defaultOpen}
     >
@@ -4104,7 +4168,7 @@ function buildProjection(form) {
   for (const occurrence of payrollOccurrences) {
     const year = occurrence.date.getFullYear();
     const settings = createIncomeYearSettings(getResolvedIncomeYearSettings(incomeModel, year));
-    const tracker = yearlyTrackers.get(year) || createIncomeYearTracker();
+    const tracker = yearlyTrackers.get(year) || createRetirementSeededIncomeTracker(investmentModel, year);
     const breakdown = calculatePayrollOccurrence(settings, tracker, occurrence.kind);
 
     if (breakdown.gross <= 0) {
@@ -5012,6 +5076,7 @@ function createIncomeModel(accounts = [], seedYear = new Date().getFullYear()) {
 }
 
 function createInvestmentModel(accounts = [], startDate = todayISO(), raw = {}) {
+  const fallbackYear = parseLocalDate(startDate).getFullYear();
   return {
     sourceAccountId: resolveCashAccountId(raw.sourceAccountId ?? raw.investmentSourceAccountId, accounts),
     destinationAccountId: resolveInvestmentAccountId(raw.destinationAccountId ?? raw.brokerageAccountId, accounts),
@@ -5020,7 +5085,16 @@ function createInvestmentModel(accounts = [], startDate = todayISO(), raw = {}) 
     recurringAmount: Math.max(0, Number(raw.recurringAmount ?? raw.monthlyInvestment) || 0),
     startingBrokerageBalance: Math.max(0, Number(raw.startingBrokerageBalance) || 0),
     startingRetirementBalance: Math.max(0, Number(raw.startingRetirementBalance) || 0),
+    retirementProgressByYear: normalizeRetirementProgressByYear(raw.retirementProgressByYear, fallbackYear),
     annualReturnRate: Number.isFinite(Number(raw.annualReturnRate)) ? Number(raw.annualReturnRate) : 7,
+  };
+}
+
+function createRetirementProgress(seed = {}) {
+  return {
+    rothEmployeeContributed: Math.max(0, Number(seed.rothEmployeeContributed ?? seed.rothEmployee) || 0),
+    afterTaxContributed: Math.max(0, Number(seed.afterTaxContributed ?? seed.afterTax) || 0),
+    employerMatchContributed: Math.max(0, Number(seed.employerMatchContributed ?? seed.employerMatch) || 0),
   };
 }
 
@@ -5342,6 +5416,7 @@ function getPreviousConfiguredIncomeYear(incomeModel, year) {
 }
 
 function normalizeInvestmentModel(raw, accounts = [], legacy = {}) {
+  const fallbackYear = parseLocalDate(legacy.startDate || todayISO()).getFullYear();
   const base = raw && typeof raw === 'object' && !Array.isArray(raw)
     ? raw
     : createInvestmentModel(accounts, legacy.startDate, legacy);
@@ -5354,8 +5429,32 @@ function normalizeInvestmentModel(raw, accounts = [], legacy = {}) {
     recurringAmount: Math.max(0, Number(base.recurringAmount ?? legacy.monthlyInvestment) || 0),
     startingBrokerageBalance: Math.max(0, Number(base.startingBrokerageBalance) || 0),
     startingRetirementBalance: Math.max(0, Number(base.startingRetirementBalance) || 0),
+    retirementProgressByYear: normalizeRetirementProgressByYear(base.retirementProgressByYear, fallbackYear),
     annualReturnRate: Number.isFinite(Number(base.annualReturnRate)) ? Number(base.annualReturnRate) : 7,
   };
+}
+
+function normalizeRetirementProgressByYear(raw, fallbackYear) {
+  const entries = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? Object.entries(raw).filter(([key]) => /^\d{4}$/.test(key))
+    : [];
+
+  if (!entries.length) return { [fallbackYear]: createRetirementProgress() };
+  return Object.fromEntries(entries.map(([year, progress]) => [year, createRetirementProgress(progress)]));
+}
+
+function getRetirementProgressForYear(investmentModel, year) {
+  const progress = investmentModel?.retirementProgressByYear?.[year];
+  return createRetirementProgress(progress);
+}
+
+function createRetirementSeededIncomeTracker(investmentModel, year) {
+  const progress = getRetirementProgressForYear(investmentModel, year);
+  return createIncomeYearTracker({
+    rothEmployee: progress.rothEmployeeContributed,
+    afterTax: progress.afterTaxContributed,
+    employerMatch: progress.employerMatchContributed,
+  });
 }
 
 function normalizeMonthlyOverrideEntry(raw) {
