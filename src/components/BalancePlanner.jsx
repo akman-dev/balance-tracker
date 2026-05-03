@@ -68,7 +68,7 @@ const providers = {
 
 const colors = {
   income: '#185FA5',
-  invest: '#0F6E56',
+  invest: '#575799',
   rent: '#993C1D',
   spend: '#BA7517',
   proj: '#534AB7',
@@ -162,6 +162,7 @@ function providerById(id) {
 }
 
 function cleanNumber(value, fallback = null) {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
@@ -357,15 +358,17 @@ function BarChart({ labels, values, colors: barColors, height = 180, axisFormatt
   );
 }
 
-function GroupedBarChart({ labels, datasets, height = 240 }) {
+function IncomeAllocationChart({ labels, allocations, height = 250 }) {
   const width = 900;
   const padding = { top: 14, right: 20, bottom: 28, left: 54 };
-  const scale = makeScale(datasets.map((dataset) => dataset.data));
+  const totals = allocations.map((item) => Math.max(item.income, item.investing + item.rent + item.spending + item.leftover));
+  const scale = makeScale([allocations.map((item) => item.income), totals]);
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
-  const groupW = innerW / labels.length;
-  const barW = groupW / datasets.length * 0.62;
+  const slotW = innerW / labels.length;
+  const barW = slotW * 0.56;
   const zeroY = padding.top + (1 - (0 - scale.min) / (scale.max - scale.min)) * innerH;
+  const yFor = (value) => padding.top + (1 - (value - scale.min) / (scale.max - scale.min)) * innerH;
 
   return (
     <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img">
@@ -380,22 +383,87 @@ function GroupedBarChart({ labels, datasets, height = 240 }) {
         );
       })}
       {labels.map((label, i) => {
-        const x = padding.left + (i + 0.5) * groupW;
+        const x = padding.left + (i + 0.5) * slotW;
         return <text className="x-label" key={label} x={x} y={height - 6} textAnchor="middle">{label}</text>;
       })}
-      {datasets.map((dataset, dsIndex) => (
-        <g key={dataset.label}>
-          {dataset.data.map((value, i) => {
-            const groupX = padding.left + i * groupW;
-            const x = groupX + (groupW - barW * datasets.length) / 2 + dsIndex * barW;
-            const y = padding.top + (1 - (value - scale.min) / (scale.max - scale.min)) * innerH;
-            const top = Math.min(y, zeroY);
-            const h = Math.max(2, Math.abs(y - zeroY));
-            const fill = Array.isArray(dataset.color) ? dataset.color[i] : dataset.color;
-            return <rect key={i} x={x} y={top} width={barW - 2} height={h} rx="3" fill={fill} opacity="0.82" />;
-          })}
-        </g>
-      ))}
+      {allocations.map((item, i) => {
+        const x = padding.left + i * slotW + (slotW - barW) / 2;
+        const segments = [
+          { key: 'investing', value: item.investing, color: colors.invest },
+          { key: 'rent', value: item.rent, color: colors.rent },
+          { key: 'spending', value: item.spending, color: colors.spend },
+          { key: 'leftover', value: item.leftover, color: colors.cf },
+        ];
+        let cursor = 0;
+        return (
+          <g key={labels[i]}>
+            {segments.map((segment) => {
+              if (segment.value <= 0) return null;
+              const start = cursor;
+              cursor += segment.value;
+              const y = yFor(cursor);
+              const h = Math.max(2, yFor(start) - y);
+              return <rect key={segment.key} x={x} y={y} width={barW} height={h} fill={segment.color} opacity="0.84" />;
+            })}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function SankeyAllocationChart({ items, sourceLabel = 'Income', height = 270 }) {
+  const width = 900;
+  const padding = { top: 24, right: 52, bottom: 24, left: 52 };
+  const usableH = height - padding.top - padding.bottom;
+  const positiveItems = items.filter((item) => item.value > 0);
+  const total = positiveItems.reduce((sum, item) => sum + item.value, 0);
+  const maxNodeH = usableH * 0.72;
+  const scale = total > 0 ? maxNodeH / total : 0;
+  const nodeW = 18;
+  const sourceX = padding.left + 58;
+  const targetX = width - padding.right - 190;
+  const gap = 14;
+  const minTargetH = 22;
+  const displayedItems = positiveItems.map((item) => ({ ...item, h: Math.max(minTargetH, item.value * scale) }));
+  const displayedTotalH = displayedItems.reduce((sum, item) => sum + item.h, 0);
+  const sourceH = Math.max(28, displayedTotalH);
+  const sourceY = padding.top + (usableH - sourceH) / 2;
+  const targetTotalH = displayedTotalH + Math.max(0, displayedItems.length - 1) * gap;
+  let targetCursor = padding.top + (usableH - targetTotalH) / 2;
+  let sourceCursor = sourceY;
+
+  if (!positiveItems.length) {
+    return <div className="empty">Add income and allocations to see the annual flow.</div>;
+  }
+
+  return (
+    <svg className="chart sankey-chart" viewBox={`0 0 ${width} ${height}`} role="img">
+      <defs>
+        <filter id="sankeySoftShadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3" floodOpacity="0.12" />
+        </filter>
+      </defs>
+      {displayedItems.map((item) => {
+        const sy = sourceCursor + item.h / 2;
+        const targetH = item.h;
+        const ty = targetCursor + targetH / 2;
+        const path = `M ${sourceX + nodeW} ${sy} C ${sourceX + 220} ${sy}, ${targetX - 220} ${ty}, ${targetX} ${ty}`;
+        sourceCursor += item.h;
+        const node = { ...item, y: targetCursor, path };
+        targetCursor += targetH + gap;
+        return (
+          <g key={item.label}>
+            <path d={node.path} fill="none" stroke={node.color} strokeWidth={node.h} strokeOpacity="0.24" strokeLinecap="butt" />
+            <rect x={targetX} y={node.y} width={nodeW} height={node.h} fill={node.color} filter="url(#sankeySoftShadow)" />
+            <text className="sankey-label" x={targetX + nodeW + 12} y={node.y + node.h / 2 - 2}>{node.label}</text>
+            <text className="sankey-value" x={targetX + nodeW + 12} y={node.y + node.h / 2 + 16}>{fmtS(node.value)}</text>
+          </g>
+        );
+      })}
+      <rect x={sourceX} y={sourceY} width={nodeW} height={sourceH} fill={colors.income} filter="url(#sankeySoftShadow)" />
+      <text className="sankey-source-label" x={sourceX - 12} y={sourceY + sourceH / 2 - 2} textAnchor="end">{sourceLabel}</text>
+      <text className="sankey-source-value" x={sourceX - 12} y={sourceY + sourceH / 2 + 16} textAnchor="end">{fmtS(total)}</text>
     </svg>
   );
 }
@@ -858,7 +926,7 @@ export default function BalancePlanner() {
           <main>
             {activeMain === 'overview' ? <Overview derived={derived} state={state} plan={plan} /> : null}
             {activeMain === 'spending' ? <Spending state={state} plan={plan} setSpAct={setSpAct} /> : null}
-            {activeMain === 'investments' ? <Investments state={state} derived={derived} plan={plan} /> : null}
+            {activeMain === 'investments' ? <Investments state={state} derived={derived} plan={plan} setInvAct={setInvAct} /> : null}
             {activeMain === 'projection' ? <Projection state={state} derived={derived} plan={plan} patchState={patchState} setInvAct={setInvAct} /> : null}
             {activeMain === 'points' ? (
               <Points
@@ -893,21 +961,11 @@ function AuthScreen(props) {
 
   return (
     <main className="auth-screen">
-      <section className="auth-hero">
-        <p className="eyebrow">Balance Tracker</p>
-        <h1>Build your 2026 finance dashboard.</h1>
-        <p className="auth-copy">Cloud-only planning for cashflow, investment anchors, spending corrections, and points balances.</p>
-        <div className="auth-preview">
-          <Metric label="Storage" value={storageStatus.label} sub={storageStatus.detail} tone={storageStatus.tone === 'good' ? 'good' : undefined} />
-          <Metric label="Setup" value="Onboarding" sub="No personal defaults baked in" />
-          <Metric label="Save mode" value="Neon" sub="Cloud database only" tone="good" />
-        </div>
-      </section>
       <section className="auth-card">
         <div>
           <SectionTitle>{authMode === 'register' ? 'Create account' : 'Sign in'}</SectionTitle>
           <p className="helper-text">
-            {loading ? 'Checking Neon and your session.' : storageBlocked ? 'Cloud storage must be available before the dashboard can open.' : 'Use your account to load and save the dashboard in Neon.'}
+            {loading ? 'Checking Neon and your session.' : storageBlocked ? 'Cloud storage must be available before the dashboard can open.' : ''}
           </p>
         </div>
         <form className="auth-screen-form" onSubmit={handleAuth}>
@@ -1247,16 +1305,27 @@ function CategoryPlanEditor({ budgetCats, onChange }) {
 }
 
 function Overview({ derived, state, plan }) {
+  const [allocationView, setAllocationView] = useState('monthly');
   const totalIncome = plan.income.reduce((sum, value) => sum + value, 0);
   const totalInvested = plan.investing.reduce((sum, value) => sum + value, 0);
   const totalRent = plan.rent.reduce((sum, value) => sum + value, 0);
   const totalSpending = MONTHS.reduce((sum, _, i) => sum + derived.effectiveSpend(i), 0);
   const entered = state.spAct.filter((value) => value !== null && value !== undefined).length;
-  const spendColors = MONTHS.map((_, i) => {
-    if (state.spAct[i] === null || state.spAct[i] === undefined) return `${colors.spend}77`;
-    return derived.effectiveSpend(i) > plan.budgetSp[i] ? `${colors.danger}cc` : `${colors.actual}cc`;
-  });
   const cashflow = MONTHS.map((_, i) => derived.effectiveCashflow(i));
+  const allocations = MONTHS.map((_, i) => ({
+    income: plan.income[i],
+    investing: plan.investing[i],
+    rent: plan.rent[i],
+    spending: derived.effectiveSpend(i),
+    leftover: Math.max(0, derived.effectiveCashflow(i)),
+  }));
+  const annualCashflow = cashflow.reduce((sum, value) => sum + value, 0);
+  const sankeyItems = [
+    { label: 'Invested', value: totalInvested, color: colors.invest },
+    { label: 'Rent', value: totalRent, color: colors.rent },
+    { label: 'Spending', value: totalSpending, color: colors.spend },
+    ...(annualCashflow >= 0 ? [{ label: 'Leftover cashflow', value: annualCashflow, color: colors.cf }] : []),
+  ];
 
   return (
     <>
@@ -1267,23 +1336,28 @@ function Overview({ derived, state, plan }) {
         <Metric label="Spending" value={fmtS(totalSpending)} sub={entered ? `${entered} months corrected` : 'budgeted'} />
         <Metric label="Year-end bank" value={fmtS(derived.bank[11])} sub="uninvested cashflow" tone={derived.bank[11] >= 0 ? 'good' : 'danger'} />
       </div>
-      <Legend items={[
-        { label: 'Income', color: colors.income },
-        { label: 'Invested', color: colors.invest },
-        { label: 'Rent', color: colors.rent },
-        { label: 'Spending', color: colors.spend },
-      ]} />
+      <div className="overview-chart-head">
+        <Legend items={[
+          { label: 'Invested', color: colors.invest },
+          { label: 'Rent', color: colors.rent },
+          { label: 'Spending', color: colors.spend },
+          ...(annualCashflow >= 0 ? [{ label: 'Leftover cashflow', color: colors.cf }] : []),
+        ]} />
+        <div className="segmented" role="group" aria-label="Allocation view">
+          <button type="button" className={allocationView === 'monthly' ? 'active' : ''} onClick={() => setAllocationView('monthly')}>Monthly</button>
+          <button type="button" className={allocationView === 'annual' ? 'active' : ''} onClick={() => setAllocationView('annual')}>Annual</button>
+        </div>
+      </div>
       <div className="chart-wrap tall">
-        <GroupedBarChart
-          labels={MONTHS}
-          datasets={[
-            { label: 'Income', data: plan.income, color: colors.income },
-            { label: 'Invested', data: plan.investing, color: colors.invest },
-            { label: 'Rent', data: plan.rent, color: colors.rent },
-            { label: 'Spending', data: MONTHS.map((_, i) => derived.effectiveSpend(i)), color: spendColors },
-          ]}
-          height={250}
-        />
+        {allocationView === 'annual' ? (
+          <SankeyAllocationChart items={sankeyItems} sourceLabel={annualCashflow >= 0 ? 'Income' : 'Income + shortfall'} height={270} />
+        ) : (
+          <IncomeAllocationChart
+            labels={MONTHS}
+            allocations={allocations}
+            height={250}
+          />
+        )}
       </div>
       <div className="two-col">
         <div className="card">
@@ -1364,7 +1438,7 @@ function Spending({ state, plan, setSpAct }) {
   );
 }
 
-function Investments({ state, derived, plan }) {
+function Investments({ state, derived, plan, setInvAct }) {
   const actualSeries = MONTHS.map((_, i) => derived.getInv(i));
   const projectedSeries = MONTHS.map((_, i) => {
     if (i < derived.anchor.index) return null;
@@ -1398,6 +1472,28 @@ function Investments({ state, derived, plan }) {
       <div className="card spacious">
         <SectionTitle>Monthly contributions</SectionTitle>
         <BarChart labels={MONTHS} values={plan.investing} colors={MONTHS.map(() => colors.invest)} height={170} />
+      </div>
+      <div className="card spacious">
+        <SectionTitle>2026 investment corrections</SectionTitle>
+        <p className="helper-text">Enter real end-of-month balances to re-anchor the projection. The most recent actual becomes the new baseline.</p>
+        <div className="inv-row header-row">
+          <span>Month</span><span>Projected</span><span>Actual</span><span>Diff</span><span>Anchor</span>
+        </div>
+        {MONTHS.map((month, i) => {
+          const isFixed = plan.fixedInv[i] !== null && state.userInv[i] === undefined;
+          const actual = derived.getInv(i);
+          const projected = derived.proj26[i];
+          const diff = actual !== null && actual !== undefined && projected !== null ? actual - projected : null;
+          return (
+            <div className="inv-row" key={month}>
+              <strong>{month}</strong>
+              <span>{projected !== null ? fmt(projected) : '-'}</span>
+              <input type="number" min="0" step="1" readOnly={isFixed} placeholder={actual !== null && actual !== undefined ? fmt(actual) : 'enter'} value={actual ?? ''} onChange={(event) => setInvAct(i, event.target.value)} />
+              <span>{diff !== null ? <span className={`badge ${diff >= 0 ? 'badge-g' : 'badge-r'}`}>{diff >= 0 ? '+' : ''}{fmtS(diff)}</span> : '-'}</span>
+              <span>{i === derived.anchor.index ? <span className="badge badge-p">anchor</span> : <span className="muted">-</span>}</span>
+            </div>
+          );
+        })}
       </div>
     </>
   );
@@ -1441,28 +1537,6 @@ function Projection({ state, derived, plan, patchState, setInvAct }) {
       ]} />
       <div className="chart-wrap tall">
         <LineChart labels={longProjection.labels.map(String)} datasets={[{ label: 'Projection', data: longProjection.values, color: colors.proj, fill: true }]} height={290} includeZero={false} />
-      </div>
-      <div className="card spacious">
-        <SectionTitle>2026 investment corrections</SectionTitle>
-        <p className="helper-text">Enter real end-of-month balances to re-anchor the projection. The most recent actual becomes the new baseline.</p>
-        <div className="inv-row header-row">
-          <span>Month</span><span>Projected</span><span>Actual</span><span>Diff</span><span>Anchor</span>
-        </div>
-        {MONTHS.map((month, i) => {
-          const isFixed = plan.fixedInv[i] !== null && state.userInv[i] === undefined;
-          const actual = derived.getInv(i);
-          const projected = derived.proj26[i];
-          const diff = actual !== null && actual !== undefined && projected !== null ? actual - projected : null;
-          return (
-            <div className="inv-row" key={month}>
-              <strong>{month}</strong>
-              <span>{projected !== null ? fmt(projected) : '-'}</span>
-              <input type="number" min="0" step="1" readOnly={isFixed} placeholder={actual !== null && actual !== undefined ? fmt(actual) : 'enter'} value={actual ?? ''} onChange={(event) => setInvAct(i, event.target.value)} />
-              <span>{diff !== null ? <span className={`badge ${diff >= 0 ? 'badge-g' : 'badge-r'}`}>{diff >= 0 ? '+' : ''}{fmtS(diff)}</span> : '-'}</span>
-              <span>{i === derived.anchor.index ? <span className="badge badge-p">anchor</span> : <span className="muted">-</span>}</span>
-            </div>
-          );
-        })}
       </div>
     </>
   );
@@ -1699,13 +1773,15 @@ h1{margin:0;font-size:21px;font-weight:560;letter-spacing:0;color:var(--text-pri
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin-bottom:1.25rem}
 .metric{background:var(--bg-secondary);border-radius:8px;padding:12px 14px;min-width:0}.metric-label{font-size:12px;color:var(--text-secondary);margin-bottom:4px}.metric-value{font-size:20px;line-height:1.15;font-weight:560;color:var(--text-primary);letter-spacing:0;font-variant-numeric:tabular-nums}.metric-sub{font-size:11px;color:var(--text-tertiary);margin-top:4px}.tone-good{color:var(--green-text)}.tone-danger{color:var(--red-text)}.sub-good{color:var(--green-text)}.sub-danger{color:var(--red-text)}
 .card{background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px;padding:1rem 1.25rem}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1.25rem}.spacious{margin-top:1.25rem}.spacious-top{margin-top:1rem}.chart-wrap{position:relative;width:100%;background:transparent}.chart-wrap.tall{height:auto}
-.auth-shell{min-height:100vh;display:grid;align-content:center}.auth-screen{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,.7fr);gap:1rem;align-items:stretch}.auth-hero,.auth-card{background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px;padding:1.25rem}.auth-hero{display:flex;flex-direction:column;justify-content:space-between;min-height:390px}.auth-hero h1{font-size:34px;line-height:1.05;max-width:520px;margin-top:10px}.auth-copy{color:var(--text-secondary);max-width:500px;margin:14px 0 0}.auth-preview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2rem}.auth-card{display:grid;gap:18px;align-content:center}.auth-screen-form{display:grid;gap:10px}.auth-screen-form input{text-align:left}
+.auth-shell{min-height:100vh;display:grid;align-content:center}.auth-screen{display:grid;grid-template-columns:minmax(0,420px);justify-content:center;width:100%;gap:1rem;align-items:stretch}.auth-hero,.auth-card{background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px;padding:1.25rem}.auth-hero{display:flex;flex-direction:column;justify-content:space-between;min-height:390px}.auth-hero h1{font-size:34px;line-height:1.05;max-width:520px;margin-top:10px}.auth-copy{color:var(--text-secondary);max-width:500px;margin:14px 0 0}.auth-preview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2rem}.auth-card{display:grid;gap:18px;align-content:center}.auth-screen-form{display:grid;gap:10px}.auth-screen-form input{text-align:left}
 .storage-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px;padding:12px 14px;margin:-.25rem 0 1.25rem}.storage-panel.embedded{margin:0;background:var(--bg-secondary)}.storage-copy{display:flex;align-items:center;gap:10px;min-width:0}.storage-copy strong{display:block;font-size:13px;font-weight:650;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.storage-copy p{margin:1px 0 0;font-size:12px;color:var(--text-secondary);line-height:1.35}.status-dot{width:9px;height:9px;border-radius:50%;background:var(--text-tertiary);flex:none}.status-dot.good{background:var(--green-text)}.status-dot.warn{background:var(--red-text)}.auth-form{display:grid;grid-template-columns:160px 160px auto auto;gap:8px;align-items:center}.auth-form input{text-align:left}.auth-error{grid-column:1/-1;color:var(--red-text);font-size:12px}.link-button{border:0;background:transparent;color:var(--text-secondary);font-size:12px;padding:4px 0}.link-button:hover{color:var(--text-primary)}.storage-note{font-size:12px;color:var(--text-secondary);white-space:nowrap}
 .onboarding-card{background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px;padding:1rem 1.25rem;margin-bottom:1.5rem}.onboarding-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:12px}.onboarding-head h2{margin:0;font-size:18px;font-weight:560;letter-spacing:0}.stepper{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin-bottom:14px}.step{display:flex;align-items:center;justify-content:center;gap:5px;border:.5px solid var(--border-subtle);border-radius:8px;background:var(--bg-secondary);color:var(--text-secondary);font-size:11px;padding:6px 5px;white-space:nowrap}.step span{display:grid;place-items:center;width:16px;height:16px;border-radius:50%;background:var(--bg-tertiary);font-size:10px}.step.active{border-color:var(--border-strong);color:var(--text-primary);background:var(--bg-primary)}.step.done span{background:var(--green-bg);color:var(--green-text)}.onboarding-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.choice-card{border:.5px solid var(--border-subtle);border-radius:12px;background:var(--bg-secondary);padding:14px;text-align:left;color:var(--text-primary);display:grid;gap:6px;min-height:118px}.choice-card strong{font-size:14px}.choice-card span{font-size:12px;color:var(--text-secondary);line-height:1.45}.choice-card.active{border:1.5px solid rgba(24,95,165,.5);background:rgba(24,95,165,.07)}.setup-stack{display:grid;gap:12px}.onboarding-fields{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.quick-provider-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.quick-provider{border:.5px solid var(--border-subtle);border-radius:10px;background:var(--bg-secondary);padding:8px;display:grid;gap:7px}.quick-provider.selected{background:rgba(24,95,165,.07);border-color:rgba(24,95,165,.5)}.quick-provider button{border:0;background:transparent;color:var(--text-primary);display:flex;align-items:center;gap:7px;text-align:left;padding:0;font-size:13px;font-weight:650}.review-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.onboarding-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.primary-btn{background:var(--text-primary);color:var(--bg-primary);border-color:var(--text-primary)}
 .matrix-wrap{overflow-x:auto;border:.5px solid var(--border-subtle);border-radius:12px;background:var(--bg-secondary)}.month-matrix{min-width:920px;display:grid}.matrix-row{display:grid;grid-template-columns:120px repeat(12,1fr);gap:6px;align-items:center;padding:7px 8px;border-bottom:.5px solid var(--border-subtle)}.matrix-row:last-child{border-bottom:0}.matrix-row strong{font-size:12px;color:var(--text-primary)}.matrix-row input{padding:5px 6px;font-size:12px}.matrix-head{position:sticky;top:0;background:var(--bg-tertiary);z-index:1}.matrix-head span{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-secondary);font-weight:650;text-align:right}.category-matrix{min-width:1040px}
 .section-title{font-size:11px;font-weight:650;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}.helper-text{font-size:12px;color:var(--text-secondary);margin:0 0 12px;line-height:1.5}.muted{color:var(--text-secondary)}
 .legend{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:10px;font-size:12px;color:var(--text-secondary);align-items:center}.leg-dot{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:middle}
+.overview-chart-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:4px}.overview-chart-head .legend{margin-bottom:0}.segmented{display:inline-flex;align-items:center;border:.5px solid var(--border-medium);border-radius:8px;background:var(--bg-secondary);padding:2px;flex:none}.segmented button{border:0;border-radius:6px;background:transparent;color:var(--text-secondary);font-size:12px;font-weight:650;padding:4px 10px;min-width:66px}.segmented button:hover{color:var(--text-primary)}.segmented button.active{background:var(--bg-primary);color:var(--text-primary);box-shadow:0 1px 3px rgba(0,0,0,.08)}
 .chart{display:block;width:100%;height:auto;overflow:visible}.grid-line{stroke:var(--border-subtle);stroke-width:1}.axis-label,.x-label{fill:var(--text-tertiary);font-size:11px}.x-label{fill:var(--text-secondary)}
+.sankey-chart{min-height:240px}.sankey-label,.sankey-source-label{fill:var(--text-primary);font-size:13px;font-weight:650}.sankey-value,.sankey-source-value{fill:var(--text-secondary);font-size:12px;font-variant-numeric:tabular-nums}
 input[type=number],input[type=text],input[type=email],input[type=password],select{background:var(--bg-secondary);border:.5px solid var(--border-medium);border-radius:8px;padding:6px 9px;font-size:13px;color:var(--text-primary);width:100%;transition:border-color .15s,background .15s}input[type=number]{text-align:right;-moz-appearance:textfield}input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{appearance:none}input:focus,select:focus{outline:none;border-color:var(--border-strong)}input[readonly]{opacity:.55;cursor:default}input[type=range]{flex:1;accent-color:var(--text-primary);cursor:pointer}
 .btn{padding:7px 16px;font-size:13px;border:.5px solid var(--border-medium);border-radius:8px;background:var(--bg-primary);color:var(--text-primary);white-space:nowrap}.btn:hover{background:var(--bg-secondary)}.btn:disabled{opacity:.45;cursor:not-allowed}
 .proj-controls{display:flex;flex-direction:column;gap:14px}.ctrl-row{display:flex;align-items:center;gap:12px}.ctrl-label{font-size:13px;color:var(--text-secondary);min-width:120px}.ctrl-val{font-size:13px;font-weight:600;min-width:60px;text-align:right;font-variant-numeric:tabular-nums}
@@ -1719,6 +1795,6 @@ input[type=number],input[type=text],input[type=email],input[type=password],selec
 .txn-form{display:grid;grid-template-columns:1fr 1fr 110px auto;gap:8px;align-items:end}.txn-hdr,.txn-item{display:grid;grid-template-columns:72px 1fr 90px 1fr 24px;gap:8px;align-items:center}.txn-hdr{padding-bottom:6px;border-bottom:.5px solid var(--border-subtle);font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.04em;color:var(--text-secondary)}.txn-list{display:flex;flex-direction:column;max-height:280px;overflow:auto}.txn-item{padding:6px 0;border-bottom:.5px solid var(--border-subtle);font-size:12px}.txn-date,.txn-desc{color:var(--text-secondary)}.txn-name{display:flex;align-items:center;gap:5px;font-weight:650}.txn-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pts-earn{color:var(--green-text);font-weight:650;text-align:right}.pts-redeem{color:var(--red-text);font-weight:650;text-align:right}.right{text-align:right}.del-btn{cursor:pointer;color:var(--text-tertiary);font-size:18px;line-height:1;border:0;background:transparent;padding:0;text-align:center}.del-btn:hover{color:var(--text-primary)}
 .empty{text-align:center;padding:2rem;color:var(--text-secondary);font-size:13px}.large-empty{background:var(--bg-primary);border:.5px solid var(--border-subtle);border-radius:12px}
 @media(max-width:900px){.auth-screen{grid-template-columns:1fr}.auth-hero{min-height:auto}.auth-preview{grid-template-columns:1fr 1fr}.auth-form{grid-template-columns:1fr 1fr auto}.auth-form .link-button{grid-column:1/-1;justify-self:start}.onboarding-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.onboarding-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-provider-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.review-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stepper{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:720px){.dashboard-shell{padding:0 1rem 3rem}.two-col{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ctrl-row{display:grid;grid-template-columns:1fr auto}.ctrl-row input{grid-column:1/-1}.storage-panel{grid-template-columns:1fr}.auth-form{grid-template-columns:1fr 1fr}.auth-form .btn{grid-column:1/-1}.txn-form{grid-template-columns:1fr 1fr}.txn-form .btn{grid-column:1/-1}.donut-wrap{grid-template-columns:1fr;justify-items:center}.corr-grid{grid-template-columns:50px 1fr 1fr 76px}.inv-row{grid-template-columns:44px 1fr 1fr 72px 54px;font-size:12px}.tab{padding-left:14px;padding-right:14px}}
+@media(max-width:720px){.dashboard-shell{padding:0 1rem 3rem}.two-col{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ctrl-row{display:grid;grid-template-columns:1fr auto}.ctrl-row input{grid-column:1/-1}.storage-panel{grid-template-columns:1fr}.auth-form{grid-template-columns:1fr 1fr}.auth-form .btn{grid-column:1/-1}.txn-form{grid-template-columns:1fr 1fr}.txn-form .btn{grid-column:1/-1}.donut-wrap{grid-template-columns:1fr;justify-items:center}.corr-grid{grid-template-columns:50px 1fr 1fr 76px}.inv-row{grid-template-columns:44px 1fr 1fr 72px 54px;font-size:12px}.tab{padding-left:14px;padding-right:14px}.overview-chart-head{align-items:stretch;flex-direction:column}.segmented{align-self:flex-start}}
 @media(max-width:480px){.metrics,.auth-preview{grid-template-columns:1fr}.auth-hero h1{font-size:28px}.app-header{align-items:flex-start;flex-direction:column}.header-status{width:100%;justify-content:space-between}.stepper,.onboarding-grid,.onboarding-fields,.quick-provider-grid,.review-grid{grid-template-columns:1fr}.txn-hdr,.txn-item{grid-template-columns:70px 1fr 70px 24px}.txn-hdr span:nth-child(4),.txn-item .txn-desc{display:none}.bbar{grid-template-columns:82px 1fr 48px}.card,.onboarding-card,.auth-hero,.auth-card{padding:.9rem}.chart{min-width:620px}.chart-wrap{overflow-x:auto}.provider-grid{grid-template-columns:1fr}.bal-row{grid-template-columns:1fr auto}.bal-row > span:last-child{grid-column:1/-1;justify-self:start}}
 `;
