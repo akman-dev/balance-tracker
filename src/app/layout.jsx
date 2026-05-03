@@ -1,6 +1,6 @@
 export const metadata = {
-  title: 'BalTrack — Balance & Net Worth Tracker',
-  description: 'Personal finance planner for cash flow, bills, credit cards, and investment projections.',
+  title: 'Balance Tracker — 2026 Finance Dashboard',
+  description: 'A personal dashboard for cashflow, investments, spending corrections, and points balances.',
 };
 
 export default function RootLayout({ children }) {
